@@ -1,301 +1,50 @@
-import http from "http";
-import crypto from "crypto";
-import { WebSocketServer } from "ws";
-
-const PORT = process.env.PORT || 10000;
-
-const rooms = new Map();
-
-function createRoomCode() {
-    return crypto.randomBytes(3).toString("hex").toUpperCase();
-}
-
-function send(ws, data) {
-    if (ws.readyState === 1) {
-        ws.send(JSON.stringify(data));
+/**
+ * LiyuFlix - Final Isolated Realtime Sync Room Backend Engine
+ * Handles private rooms, sync timelines, text chats, and 3D head rotation relays.
+ */
+const express = require('express');
+const app = express();
+const http = require('http').createServer(app);
+const io = require('socket.io')(http, {
+    cors: {
+        origin: "*", // Allows any phone browser or packaged app connection to securely map in
+        methods: ["GET", "POST"]
     }
-}
-
-function broadcast(room, data, except = null) {
-    for (const client of room.clients) {
-        if (client !== except) {
-            send(client, data);
-        }
-    }
-}
-
-const httpServer = http.createServer((req, res) => {
-    res.writeHead(200, {
-        "Content-Type": "text/plain; charset=utf-8"
-    });
-
-    res.end("Watch Together server is running.");
 });
 
-const wss = new WebSocketServer({
-    server: httpServer
-});
+io.on('connection', (socket) => {
+    console.log(`Connected client connection ID: ${socket.id}`);
 
-wss.on("connection", (ws) => {
-    ws.roomCode = null;
-    ws.username = "Guest";
-
-    ws.on("message", (raw) => {
-        let message;
-
-        try {
-            message = JSON.parse(raw.toString());
-        } catch {
-            send(ws, {
-                type: "error",
-                message: "Invalid message."
-            });
-
-            return;
-        }
-
-        /*
-         * CREATE ROOM
-         */
-        if (message.type === "create-room") {
-            let roomCode;
-
-            do {
-                roomCode = createRoomCode();
-            } while (rooms.has(roomCode));
-
-            const room = {
-                clients: new Set()
-            };
-
-            rooms.set(roomCode, room);
-
-            ws.roomCode = roomCode;
-            ws.username = cleanName(message.name);
-
-            room.clients.add(ws);
-
-            send(ws, {
-                type: "room-created",
-                roomCode
-            });
-
-            send(ws, {
-                type: "presence",
-                count: room.clients.size
-            });
-
-            return;
-        }
-
-        /*
-         * JOIN ROOM
-         */
-        if (message.type === "join-room") {
-            const roomCode = String(message.roomCode || "")
-                .trim()
-                .toUpperCase();
-
-            const room = rooms.get(roomCode);
-
-            if (!room) {
-                send(ws, {
-                    type: "error",
-                    message: "Room does not exist."
-                });
-
-                return;
-            }
-
-            if (room.clients.size >= 2) {
-                send(ws, {
-                    type: "error",
-                    message: "This room already has 2 people."
-                });
-
-                return;
-            }
-
-            ws.roomCode = roomCode;
-            ws.username = cleanName(message.name);
-
-            room.clients.add(ws);
-
-            /*
-             * Tell the joining client that it successfully joined.
-             */
-            send(ws, {
-                type: "room-joined",
-                roomCode
-            });
-
-            /*
-             * Tell both users how many people are connected.
-             */
-            broadcast(room, {
-                type: "presence",
-                count: room.clients.size
-            });
-
-            /*
-             * Tell the existing user that someone joined.
-             * This allows the existing user to send its current
-             * video state to the new user.
-             */
-            broadcast(
-                room,
-                {
-                    type: "peer-joined"
-                },
-                ws
-            );
-
-            return;
-        }
-
-        /*
-         * Everything below this point requires a room.
-         */
-        if (!ws.roomCode) {
-            send(ws, {
-                type: "error",
-                message: "You are not in a room."
-            });
-
-            return;
-        }
-
-        const room = rooms.get(ws.roomCode);
-
-        if (!room) {
-            send(ws, {
-                type: "error",
-                message: "Room no longer exists."
-            });
-
-            return;
-        }
-
-        /*
-         * VIDEO SYNCHRONIZATION
-         */
-        if (message.type === "video-sync") {
-            const action = String(message.action || "");
-
-            if (
-                action !== "play" &&
-                action !== "pause" &&
-                action !== "seek"
-            ) {
-                return;
-            }
-
-            const time = Number(message.time);
-
-            if (!Number.isFinite(time) || time < 0) {
-                return;
-            }
-
-            broadcast(
-                room,
-                {
-                    type: "video-sync",
-                    action,
-                    time,
-                    sentAt: Date.now()
-                },
-                ws
-            );
-
-            return;
-        }
-
-        /*
-         * INITIAL VIDEO STATE
-         *
-         * When somebody joins, the existing user can send its
-         * current state to the new user.
-         */
-        if (message.type === "video-state") {
-            const time = Number(message.time);
-
-            if (!Number.isFinite(time) || time < 0) {
-                return;
-            }
-
-            broadcast(
-                room,
-                {
-                    type: "video-state",
-                    action: message.playing ? "play" : "pause",
-                    time,
-                    sentAt: Date.now()
-                },
-                ws
-            );
-
-            return;
-        }
-
-        /*
-         * CHAT
-         */
-        if (message.type === "chat") {
-            const text = String(message.message || "").trim();
-
-            if (!text) {
-                return;
-            }
-
-            if (text.length > 500) {
-                return;
-            }
-
-            broadcast(room, {
-                type: "chat",
-                name: ws.username,
-                message: text
-            });
-
-            return;
-        }
+    // 1. Group connection pipes into dynamic isolated paths based on room code names
+    socket.on('join-room', (roomCode) => {
+        socket.join(roomCode);
+        console.log(`Client ${socket.id} locked into private room: ${roomCode}`);
     });
 
-    /*
-     * DISCONNECT
-     */
-    ws.on("close", () => {
-        if (!ws.roomCode) {
-            return;
-        }
+    // 2. Room-isolated Play/Pause/Seek command routing
+    socket.on('sync-action', (data) => {
+        // Forwards timestamp to the opposing device in the exact same room channel
+        socket.to(data.room).emit('sync-action', data);
+    });
 
-        const room = rooms.get(ws.roomCode);
+    // 3. Room-isolated Text message chat routing
+    socket.on('room-message', (data) => {
+        socket.to(data.room).emit('room-message', data);
+    });
 
-        if (!room) {
-            return;
-        }
+    // 4. Room-isolated real-time head rotation update routing
+    socket.on('head-move', (data) => {
+        // Relays X and Y angles straight to your friend's Roblox avatar head
+        socket.to(data.room).emit('head-move', data);
+    });
 
-        room.clients.delete(ws);
-
-        broadcast(room, {
-            type: "presence",
-            count: room.clients.size
-        });
-
-        if (room.clients.size === 0) {
-            rooms.delete(ws.roomCode);
-        }
+    socket.on('disconnect', () => {
+        console.log(`Client disconnected from server: ${socket.id}`);
     });
 });
 
-function cleanName(name) {
-    const value = String(name || "Guest")
-        .trim()
-        .slice(0, 24);
-
-    return value || "Guest";
-}
-
-httpServer.listen(PORT, () => {
-    console.log(`Watch Together server running on port ${PORT}`);
+// Deploy platforms like Render provide their own live ports automatically
+const PORT = process.env.PORT || 3000;
+http.listen(PORT, () => {
+    console.log(`LiyuFlix Room Routing Pipeline live on Port: ${PORT}`);
 });
